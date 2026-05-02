@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/usr/bin/python3:*)",
+      "Bash(pip show:*)"
+    ]
+  }
+}
