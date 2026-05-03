@@ -28,7 +28,10 @@ MODEL = os.environ["MODEL_ID"]
 SYSTEM = f"""You are a coding agent at {WORKDIR}.
 Use the todo tool for multi-step work.
 Keep exactly one step in_progress when a task has multiple steps.
-Refresh the plan as work advances. Prefer tools over prose."""
+Refresh the plan as work advances. Prefer tools over prose.
+Use the task tool to delegate exploration or subtasks to a subagent with fresh context."""
+
+SUBAGENT_SYSTEM = f"You are a coding subagent at {WORKDIR}. Complete the given task, then summarize your findings."
 
 # 多少轮不更新 todo 后触发提醒
 PLAN_REMINDER_INTERVAL = 3
@@ -188,6 +191,74 @@ def run_edit(path: str, old_text: str, new_text: str) -> str:
         return f"Error: {e}"
 
 
+# ---------------------------------------------------------------------------
+# 子代理
+# ---------------------------------------------------------------------------
+
+# 子代理可用工具（不含 todo 和 task，防止递归生成计划或嵌套子代理）
+CHILD_TOOLS = [
+    {"name": "bash", "description": "Run a shell command.",
+     "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
+    {"name": "read_file", "description": "Read file contents.",
+     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}},
+    {"name": "write_file", "description": "Write content to file.",
+     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
+    {"name": "edit_file", "description": "Replace exact text in file.",
+     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
+]
+
+# 子代理工具分发表（与父代理共用同名处理函数，但不含 todo/task）
+_CHILD_TOOL_HANDLERS = {
+    "bash":       lambda **kw: run_bash(kw["command"]),
+    "read_file":  lambda **kw: run_read(kw["path"], kw.get("limit")),
+    "write_file": lambda **kw: run_write(kw["path"], kw["content"]),
+    "edit_file":  lambda **kw: run_edit(kw["path"], kw["old_text"], kw["new_text"]),
+}
+
+
+def run_subagent(prompt: str) -> str:
+    """以全新上下文运行子代理，完成后仅返回最终文本摘要给父代理。
+
+    子代理与父代理共享文件系统，但拥有独立的空白消息列表，
+    完成后父代理上下文保持整洁——子代理的中间过程全部丢弃。
+    """
+    sub_messages = [{"role": "user", "content": prompt}]  # 全新上下文
+    response = None
+    for _ in range(30):  # 安全上限
+        response = client.messages.create(
+            model=MODEL,
+            system=SUBAGENT_SYSTEM,
+            messages=sub_messages,
+            tools=CHILD_TOOLS,
+            max_tokens=8000,
+        )
+        sub_messages.append({"role": "assistant", "content": response.content})
+        if response.stop_reason != "tool_use":
+            break
+        results = []
+        for block in response.content:
+            if block.type == "tool_use":
+                handler = _CHILD_TOOL_HANDLERS.get(block.name)
+                try:
+                    output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
+                except Exception as e:
+                    output = f"Error: {e}"
+                results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": str(output)[:50000],
+                })
+        sub_messages.append({"role": "user", "content": results})
+
+    # 仅将最终文本返回给父代理——子代理上下文随即丢弃
+    if response is None:
+        return "(no response)"
+    return "".join(
+        b.text for b in response.content if hasattr(b, "text")
+    ) or "(no summary)"
+
+
+# ---------------------------------------------------------------------------
 # 工具名 -> 处理函数的分发表，新增工具只需在此处添加一行
 TOOL_HANDLERS = {
     "bash":       lambda **kw: run_bash(kw["command"]),
@@ -195,6 +266,8 @@ TOOL_HANDLERS = {
     "write_file": lambda **kw: run_write(kw["path"], kw["content"]),
     "edit_file":  lambda **kw: run_edit(kw["path"], kw["old_text"], kw["new_text"]),
     "todo":       lambda **kw: TODO.update(kw["items"]),
+    # task 由 execute_tools 单独处理，此处仅占位保持 handler 存在
+    "task":       lambda **kw: run_subagent(kw["prompt"]),
 }
 
 # 传给模型的工具定义（JSON Schema 格式）
@@ -207,6 +280,11 @@ TOOLS = [
      "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
     {"name": "edit_file", "description": "Replace exact text in file.",
      "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
+    {"name": "task", "description": "Spawn a subagent with fresh context to handle exploration or subtasks. The subagent shares the filesystem but not conversation history, and returns only a summary.",
+     "input_schema": {"type": "object", "properties": {
+         "prompt": {"type": "string", "description": "Full instructions for the subagent."},
+         "description": {"type": "string", "description": "Short description of the subtask (shown in logs)."},
+     }, "required": ["prompt"]}},
     {"name": "todo", "description": "Rewrite the current session plan for multi-step work.",
      "input_schema": {"type": "object", "properties": {"items": {"type": "array", "items": {
          "type": "object",
@@ -334,11 +412,21 @@ def execute_tools(state: State) -> dict:
     for block in last["content"]:
         if getattr(block, "type", None) != "tool_use":
             continue
-        handler = TOOL_HANDLERS.get(block.name)
-        try:
-            output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
-        except Exception as e:
-            output = f"Error: {e}"
+        if block.name == "task":
+            # 子代理：打印描述并在独立上下文中运行
+            desc = block.input.get("description", "subtask")
+            prompt = block.input.get("prompt", "")
+            print(f"\033[35m> task ({desc}): {prompt[:80]}\033[0m")
+            try:
+                output = run_subagent(prompt)
+            except Exception as e:
+                output = f"Error: {e}"
+        else:
+            handler = TOOL_HANDLERS.get(block.name)
+            try:
+                output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
+            except Exception as e:
+                output = f"Error: {e}"
         # 打印工具调用摘要，方便调试
         print(f"\033[33m> {block.name}: {str(output)[:200]}\033[0m")
         results.append({
