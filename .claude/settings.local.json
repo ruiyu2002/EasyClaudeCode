@@ -3,7 +3,8 @@
     "allow": [
       "Bash(/usr/bin/python3:*)",
       "Bash(pip show:*)",
-      "Skill(claude-api)"
+      "Skill(claude-api)",
+      "Bash(python -c \"from agent import graph, extract_text; print\\('OK'\\)\")"
     ]
   }
 }
