@@ -10,11 +10,22 @@ from typing import Annotated, TypedDict
 
 from langgraph.graph import StateGraph, START, END
 
-from config import client, MODEL, SYSTEM
+from config import client, MODEL, WORKDIR
 from normalizer import normalize_messages
+from skills import SKILL_REGISTRY
 from subagent import run_subagent
 from tools import TOOLS, TOOL_HANDLERS
 from tools.todo import TODO
+
+SYSTEM = f"""You are a coding agent at {WORKDIR}.
+Use the todo tool for multi-step work.
+Keep exactly one step in_progress when a task has multiple steps.
+Refresh the plan as work advances. Prefer tools over prose.
+Use the task tool to delegate exploration or subtasks to a subagent with fresh context.
+Use load_skill when a task needs specialized instructions before you act.
+
+Skills available:
+{SKILL_REGISTRY.describe_available()}"""
 
 
 # ---------------------------------------------------------------------------

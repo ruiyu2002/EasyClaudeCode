@@ -1,5 +1,6 @@
 from tools.implementations import run_bash, run_read, run_write, run_edit
 from tools.todo import TODO
+from skills import SKILL_REGISTRY
 
 
 def _run_subagent(**kw):
@@ -22,6 +23,8 @@ TOOLS = [
          "prompt": {"type": "string", "description": "Full instructions for the subagent."},
          "description": {"type": "string", "description": "Short description of the subtask (shown in logs)."},
      }, "required": ["prompt"]}},
+    {"name": "load_skill", "description": "Load the full body of a named skill into the current context.",
+     "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
     {"name": "todo", "description": "Rewrite the current session plan for multi-step work.",
      "input_schema": {"type": "object", "properties": {"items": {"type": "array", "items": {
          "type": "object",
@@ -40,6 +43,7 @@ TOOL_HANDLERS = {
     "read_file":  lambda **kw: run_read(kw["path"], kw.get("limit")),
     "write_file": lambda **kw: run_write(kw["path"], kw["content"]),
     "edit_file":  lambda **kw: run_edit(kw["path"], kw["old_text"], kw["new_text"]),
+    "load_skill": lambda **kw: SKILL_REGISTRY.load_full_text(kw["name"]),
     "todo":       lambda **kw: TODO.update(kw["items"]),
     "task":       _run_subagent,
 }

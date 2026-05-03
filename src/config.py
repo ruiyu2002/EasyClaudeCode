@@ -13,12 +13,9 @@ if os.getenv("ANTHROPIC_BASE_URL"):
 WORKDIR = Path.cwd()
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
+SKILLS_DIR = WORKDIR / "skills"
 
-SYSTEM = f"""You are a coding agent at {WORKDIR}.
-Use the todo tool for multi-step work.
-Keep exactly one step in_progress when a task has multiple steps.
-Refresh the plan as work advances. Prefer tools over prose.
-Use the task tool to delegate exploration or subtasks to a subagent with fresh context."""
+# SYSTEM 在 graph.py 中组装（需要先加载 SkillRegistry 的技能目录）
 
 SUBAGENT_SYSTEM = f"You are a coding subagent at {WORKDIR}. Complete the given task, then summarize your findings."
 
