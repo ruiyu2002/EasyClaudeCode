@@ -2,7 +2,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from config import WORKDIR, SKILLS_DIR
+from config import SKILLS_DIR
 
 
 @dataclass
